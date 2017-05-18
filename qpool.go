@@ -62,7 +62,12 @@ func (qp *QPool) Release(v int64) {
 	// By having to make do without locks here and using sync/atomic,
 	// we're able to provide a non-blocking Release operation.
 	atomic.AddInt64(&qp.quota, v)
-	qp.cond.Signal()
+
+	// We broadcast to all listeners, given acquisitions are serialized via
+	// qp.Mutex every goroutine that potentially stands to acquire the quota
+	// does so without individual acquisition threads needing to coordinate
+	// among one another.
+	qp.cond.Broadcast()
 }
 
 // QPool.Acquire attempts to acquire the specified amount of quota and blocks
@@ -114,13 +119,9 @@ func (qp *QPool) Acquire(ctx context.Context, v int64) error {
 		// Wake up the acquisition goroutine to signal it to stop working.
 		qp.cond.Broadcast()
 
-		// We acquired quota, we release it back because the quota pool was
-		// closed.
-		// NB: Strictly speaking this is not necessary given future allocations
-		// will fail anyway.
-		if err := <-res; err == nil {
-			qp.Release(v)
-		}
+		// We acquired quota, we need not release it back to the pool given
+		// future allocations will fail anyway.
+		<-res
 
 		return errors.New("quota pool closed")
 	case err := <-res:
@@ -169,11 +170,6 @@ func (qp *QPool) acquire(v int64, done *bool, res chan<- error) {
 	// Critical section, we have the lock.
 	// Lock held for decrementing.
 	atomic.AddInt64(&qp.quota, -v)
-
-	// Wake another waiting thread, if appropriate.
-	if atomic.LoadInt64(&qp.quota) > 0 {
-		qp.cond.Signal()
-	}
 
 	// Release this monitor's lock.
 	qp.cond.L.Unlock()

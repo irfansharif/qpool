@@ -52,6 +52,15 @@ func (qp *QPool) Quota() int64 { ... }
 func (qp *QPool) Release(v int64) { ... }
 ```
 
+## Testing
+It's hard to exhaustively test something as subtle as this and while it's not
+really a proof for correctness, I've used this (or rather a very slight
+variation of this) in
+[cockroachdb/cockroach](https://github.com/cockroachdb/cockroach) at our
+[storage
+layer](https://github.com/cockroachdb/cockroach/tree/master/pkg/storage) with
+no issues.
+
 ## Author
 Irfan Sharif: <irfanmahmoudsharif@gmail.com>, [@irfansharifm](https://twitter.com/irfansharifm)
 
