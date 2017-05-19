@@ -1,4 +1,4 @@
-// Copyright 2017, Irfan Sharif
+// Copyright 2017 The Cockroach Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,13 +14,19 @@
 //
 // Author: Irfan Sharif (irfanmahmoudsharif@gmail.com)
 //
-// +build chan
+// +build ballot
 //
-// Building with '-tags chan' will build the version of QPool using channels
-// only (also see qpool-ballot.go for another channels-only implementation).
-// The idea is quite simple, for each acquisition if we don't have enough we
-// register a notify channel that subsequent quota releases communicate with us
-// over.
+// Building with '-tags ballot' will build the version of QPool using only
+// channels. The general idea is that there is a notification channel all
+// ongoing acquisitions are listening in on. Any quota Release notifies an
+// arbitrary listener on the channel, the listener deducts quota if possible
+// and notifies the next goroutine waiting for acquisition (if any) if there's
+// still quota remaining. Additionally if there isn't enough quota available,
+// we wait until we've notified another goroutine (this avoids busy waiting
+// lest this goroutine notifies itself). If in the interim we receive another
+// notification, it must've been so that there was new quota added to the
+// system so we try again.
+// NOTE: This is done so using goto.
 
 package qpool
 
@@ -36,31 +42,27 @@ import (
 type QPool struct {
 	sync.Mutex
 
-	quota       int64
-	closed      bool
-	closedCh    chan struct{}
-	listenerChs map[*tuple]tuple
+	quota    int64
+	closed   bool
+	notifyCh chan struct{}
+	closedCh chan struct{}
 }
 
 // qpool.New returns a new instance of a quota pool initialized with the
 // specified quota.
-func New(v int64) *QPool {
-	return &QPool{
-		quota:       v,
-		closedCh:    make(chan struct{}),
-		listenerChs: make(map[*tuple]tuple),
+func New(q int64) *QPool {
+	qp := &QPool{
+		notifyCh: make(chan struct{}),
+		closedCh: make(chan struct{}),
+		quota:    q,
 	}
+	return qp
 }
 
-type tuple struct {
-	listenerCh chan int64
-	closedCh   chan struct{}
-}
-
-// QPool.Release is a blocking call that releases the specified quota back to
-// the pool, it is safe for concurrent use. Releasing quota that was never
-// acquired (see QPool.Acquire) in the first place increases the total quota
-// available across the quota pool.
+// QPool.Release returns the specified amount back to the quota pool and is
+// safe for concurrent use. Releasing quota that was never acquired (see
+// QPool.Acquire) in the first place increases the total quota available across
+// the quota pool.
 // Releasing quota back to a closed quota pool will go through but as
 // specified in the contract for Close, any subsequent or ongoing Acquire
 // operations fail with an error indicating so.
@@ -68,14 +70,9 @@ func (qp *QPool) Release(v int64) {
 	qp.Lock()
 	qp.quota += v
 
-	for k, t := range qp.listenerChs {
-		select {
-		case t.listenerCh <- qp.quota:
-			<-t.listenerCh
-		case <-t.closedCh:
-			close(t.listenerCh)
-			delete(qp.listenerChs, k)
-		}
+	select {
+	case qp.notifyCh <- struct{}{}:
+	default:
 	}
 	qp.Unlock()
 }
@@ -87,26 +84,14 @@ func (qp *QPool) Release(v int64) {
 // acquisition of size 'v', the caller is responsible for returning the quota
 // back to the pool eventually (see QPool.Release).
 // Safe for concurrent use.
-func (qp *QPool) Acquire(ctx context.Context, v int64) (err error) {
-	var t tuple
+func (qp *QPool) Acquire(ctx context.Context, v int64) error {
 	now := time.NewTimer(0).C
-
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-qp.closedCh:
 			return errors.New("quota pool closed")
-		case quota := <-t.listenerCh:
-			if v <= quota {
-				qp.quota -= v
-				delete(qp.listenerChs, &t)
-				t.listenerCh <- 0
-				return nil
-			} else {
-				t.listenerCh <- quota
-				continue
-			}
 		case <-now:
 			qp.Lock()
 			if qp.closed {
@@ -118,12 +103,32 @@ func (qp *QPool) Acquire(ctx context.Context, v int64) (err error) {
 				qp.Unlock()
 				return nil
 			}
-			t = tuple{
-				listenerCh: make(chan int64),
-				closedCh:   make(chan struct{}),
-			}
-			qp.listenerChs[&t] = t
 			qp.Unlock()
+		case <-qp.notifyCh:
+		L:
+			qp.Lock()
+			if qp.quota < v {
+				qp.Unlock()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-qp.closedCh:
+					return errors.New("quota pool closed")
+				case qp.notifyCh <- struct{}{}:
+					continue
+				case <-qp.notifyCh:
+					goto L
+				}
+			}
+			qp.quota -= v
+			if qp.quota != 0 {
+				select {
+				case qp.notifyCh <- struct{}{}:
+				default:
+				}
+			}
+			qp.Unlock()
+			return nil
 		}
 	}
 }
@@ -141,13 +146,8 @@ func (qp *QPool) Quota() int64 {
 func (qp *QPool) Close() {
 	qp.Lock()
 	if !qp.closed {
-		close(qp.closedCh)
 		qp.closed = true
-
-		for i, t := range qp.listenerChs {
-			close(t.listenerCh)
-			delete(qp.listenerChs, i)
-		}
+		close(qp.closedCh)
 	}
 	qp.Unlock()
 }

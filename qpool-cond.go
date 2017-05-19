@@ -15,6 +15,12 @@
 // Author: Irfan Sharif (irfanmahmoudsharif@gmail.com)
 //
 // +build cond
+//
+// Building with '-tags cond' will build the version of QPool using sync.Cond,
+// this incurs a tiny cost per acquisition having to run a goroutine in order
+// to compose the condition variable with context cancellation.
+// Using condition variables enables us to put the waiting goroutine to sleep
+// until quota has been released to the pool without busy waiting.
 
 package qpool
 
@@ -168,6 +174,17 @@ func (qp *QPool) acquire(v int64, done *bool, res chan<- error) {
 			return
 		}
 	}
+
+	// TODO(irfansharif): Shouldn't the following be here? Where are the worst
+	// places such that context cancellation/quota pool closing happens but we return quota anyway.
+	// NOTE: Context cancellation is NOT serialized through a mutex, are select
+	// cases arbitrary if more than one or is there precedence?
+	//
+	// if *done {
+	// 	qp.cond.L.Unlock()
+	// 	res <- errors.New("acquisition cancelled")
+	// 	return
+	// }
 
 	// Critical section, we have the lock.
 	// Lock held for decrementing.

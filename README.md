@@ -9,6 +9,26 @@ control or admission control purposes. This implementation however differs in
 that it allows for arbitrary quota acquisitions thus allowing for finer grained
 resource management. Additionally for blocking calls `qpool` allows for
 asynchronous context cancellations by internally composing locks with channels.
+See `qpool-{cond,chan,ballot}` for three separate implementations using
+`sync.Cond` (fastest for now) and using channels (slow, more than likely
+because of me).
+
+```
+~ go test -bench=. -tags cond
+BenchmarkAcquisitions-4          2000000               863 ns/op
+PASS
+ok      github.com/irfansharif/qpool    2.739s
+
+~ go test -bench=. -tags chan
+BenchmarkAcquisitions-4          1000000              1084 ns/op
+PASS
+ok      github.com/irfansharif/qpool    1.224s
+
+~ go test -bench=. -tags ballot
+BenchmarkAcquisitions-4          1000000              1174 ns/op
+PASS
+ok      github.com/irfansharif/qpool    1.309s
+```
 
 ## API
 
@@ -58,8 +78,8 @@ really a proof for correctness, I've used this (or rather a very slight
 variation of this) in
 [cockroachdb/cockroach](https://github.com/cockroachdb/cockroach) at our
 [storage
-layer](https://github.com/cockroachdb/cockroach/tree/master/pkg/storage) with
-no issues.
+layer](https://github.com/cockroachdb/cockroach/tree/master/pkg/storage) and it
+works fine, take this with a grain of salt.
 
 ## Author
 Irfan Sharif: <irfanmahmoudsharif@gmail.com>, [@irfansharifm](https://twitter.com/irfansharifm)
