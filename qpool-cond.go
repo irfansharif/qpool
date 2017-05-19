@@ -13,6 +13,8 @@
 // permissions and limitations under the License.
 //
 // Author: Irfan Sharif (irfanmahmoudsharif@gmail.com)
+//
+// +build cond
 
 package qpool
 
@@ -75,7 +77,7 @@ func (qp *QPool) Release(v int64) {
 // cancelled or quota pool is closed altogether we return with an error
 // specifying so. For a non-nil error, indicating a successful quota
 // acquisition of size 'v', the caller is responsible for returning the quota
-// back to the pool eventually (see QPool.Return).
+// back to the pool eventually (see QPool.Release).
 // Safe for concurrent use.
 func (qp *QPool) Acquire(ctx context.Context, v int64) error {
 	// TODO(irfansharif): We may want to minimize allocations here across

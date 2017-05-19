@@ -13,9 +13,12 @@ import (
 func TestBasic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
+	var wg sync.WaitGroup
 	ctx := context.Background()
 	qp := qpool.New(5)
 	qp.Acquire(ctx, 3)
+
+	wg.Add(1)
 	go func() {
 		qp.Acquire(ctx, 1)
 		go func() {
@@ -23,15 +26,48 @@ func TestBasic(t *testing.T) {
 		}()
 		qp.Acquire(ctx, 3)
 		qp.Release(3)
+		wg.Done()
 	}()
 
 	time.Sleep(10 * time.Millisecond)
 	qp.Release(3)
 	time.Sleep(10 * time.Millisecond)
+	wg.Wait()
 	quota := qp.Quota()
 	if quota != 5 {
 		t.Fatalf("expected quota: 5, got: %d", quota)
 	}
+	qp.Close()
+}
+
+func TestBasicContextCancellation(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	qp := qpool.New(5)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for {
+			if err := qp.Acquire(ctx, 5); err != nil {
+				wg.Done()
+				break
+			}
+
+			qp.Release(5)
+		}
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	wg.Wait()
+
+	quota := qp.Quota()
+	if quota != 5 {
+		t.Fatalf("expected quota: 5, got: %d", quota)
+	}
+	qp.Close()
 }
 
 func TestContextCancellation(t *testing.T) {
@@ -60,6 +96,7 @@ func TestContextCancellation(t *testing.T) {
 				wg.Done()
 				break
 			}
+
 			qp.Release(1)
 		}
 	}()
@@ -72,6 +109,7 @@ func TestContextCancellation(t *testing.T) {
 	if quota != 5 {
 		t.Fatalf("expected quota: 5, got: %d", quota)
 	}
+	qp.Close()
 }
 
 func TestClose(t *testing.T) {
@@ -111,6 +149,7 @@ func TestClose(t *testing.T) {
 	if err := qp.Acquire(ctx, 1); err == nil {
 		t.Fatalf("acquired from closed quota pool")
 	}
+	qp.Close()
 }
 
 func TestBlocking(t *testing.T) {
@@ -150,4 +189,15 @@ func TestBlocking(t *testing.T) {
 	if quota != 1 {
 		t.Fatalf("expected quota: 5, got: %d", quota)
 	}
+	qp.Close()
+}
+
+func BenchmarkAcquisitions(b *testing.B) {
+	qp := qpool.New(5)
+	ctx := context.Background()
+	for n := 0; n < b.N; n++ {
+		qp.Acquire(ctx, 5)
+		qp.Release(5)
+	}
+	qp.Close()
 }
