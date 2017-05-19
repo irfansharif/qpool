@@ -33,7 +33,7 @@ type QPool struct {
 	quota       int64
 	closed      bool
 	closedCh    chan struct{}
-	listenerChs map[int]chan int64
+	listenerChs map[*tuple]tuple
 }
 
 // qpool.New returns a new instance of a quota pool initialized with the
@@ -42,8 +42,13 @@ func New(v int64) *QPool {
 	return &QPool{
 		quota:       v,
 		closedCh:    make(chan struct{}),
-		listenerChs: make(map[int]chan int64),
+		listenerChs: make(map[*tuple]tuple),
 	}
+}
+
+type tuple struct {
+	listenerCh chan int64
+	closedCh   chan struct{}
 }
 
 // QPool.Release is a blocking call that releases the specified quota back to
@@ -56,15 +61,14 @@ func New(v int64) *QPool {
 func (qp *QPool) Release(v int64) {
 	qp.Lock()
 	qp.quota += v
-	chs := qp.listenerChs
 
-	for i, listenerCh := range chs {
+	for k, t := range qp.listenerChs {
 		select {
-		case listenerCh <- qp.quota:
-			<-listenerCh
-		case <-listenerCh:
-			close(listenerCh)
-			delete(qp.listenerChs, i)
+		case t.listenerCh <- qp.quota:
+			<-t.listenerCh
+		case <-t.closedCh:
+			close(t.listenerCh)
+			delete(qp.listenerChs, k)
 		}
 	}
 	qp.Unlock()
@@ -78,45 +82,43 @@ func (qp *QPool) Release(v int64) {
 // back to the pool eventually (see QPool.Release).
 // Safe for concurrent use.
 func (qp *QPool) Acquire(ctx context.Context, v int64) (err error) {
-	listenerCh := make(chan int64)
-	qp.Lock()
-	i := len(qp.listenerChs)
-	qp.Unlock()
+	t := tuple{
+		listenerCh: make(chan int64),
+		closedCh:   make(chan struct{}),
+	}
 
 	now := time.NewTimer(0).C
 	for {
 		select {
 		case <-ctx.Done():
-			select {
-			case listenerCh <- 0:
-			default:
-			}
+			close(t.closedCh)
 			return ctx.Err()
 		case <-qp.closedCh:
-			select {
-			case listenerCh <- 0:
-			default:
-			}
+			close(t.closedCh)
 			return errors.New("quota pool closed")
-		case quota := <-listenerCh:
+		case quota := <-t.listenerCh:
 			if v <= quota {
 				qp.quota -= v
-				delete(qp.listenerChs, i)
-				listenerCh <- 0
+				delete(qp.listenerChs, &t)
+				t.listenerCh <- 0
 				return nil
 			} else {
-				listenerCh <- quota
+				t.listenerCh <- quota
 				continue
 			}
 		case <-now:
 			qp.Lock()
+			if qp.closed {
+				qp.Unlock()
+				return errors.New("quota pool closed")
+			}
 			if v <= qp.quota {
 				qp.quota -= v
-				close(listenerCh)
+				close(t.listenerCh)
 				qp.Unlock()
 				return nil
 			}
-			qp.listenerChs[i] = listenerCh
+			qp.listenerChs[&t] = t
 			qp.Unlock()
 		}
 	}
@@ -133,13 +135,15 @@ func (qp *QPool) Quota() int64 {
 // QPool.Close closes the quota pool and is safe for concurrent use. Any
 // ongoing and subsequent acquisitions fail with an error indicating so.
 func (qp *QPool) Close() {
-	// TODO(irfansharif): Not reusing the same lock as Acquire would reduce
-	// lock contention at the cost of increasing the overall size of the quota
-	// pool.
 	qp.Lock()
 	if !qp.closed {
 		close(qp.closedCh)
 		qp.closed = true
+
+		for i, t := range qp.listenerChs {
+			close(t.listenerCh)
+			delete(qp.listenerChs, i)
+		}
 	}
 	qp.Unlock()
 }
