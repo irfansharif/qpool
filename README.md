@@ -13,21 +13,48 @@ See `qpool-{cond,chan,ballot}` for three separate implementations using
 `sync.Cond` (fastest for now) and using channels (slow, more than likely
 because of me).
 
-```
-~ go test -bench=. -tags cond
-BenchmarkAcquisitions-4          2000000               863 ns/op
+```sh
+➜  qpool git:(master) go test -count 10 -tags chan -bench .
+BenchmarkAcquisitions-4          1000000              1085 ns/op
+BenchmarkAcquisitions-4          1000000              1087 ns/op
+BenchmarkAcquisitions-4          1000000              1052 ns/op
+BenchmarkAcquisitions-4          1000000              1076 ns/op
+BenchmarkAcquisitions-4          1000000              1075 ns/op
+BenchmarkAcquisitions-4          1000000              1066 ns/op
+BenchmarkAcquisitions-4          1000000              1067 ns/op
+BenchmarkAcquisitions-4          1000000              1068 ns/op
+BenchmarkAcquisitions-4          1000000              1073 ns/op
+BenchmarkAcquisitions-4          1000000              1101 ns/op
 PASS
-ok      github.com/irfansharif/qpool    2.739s
+ok      github.com/irfansharif/qpool    11.958s
 
-~ go test -bench=. -tags chan
-BenchmarkAcquisitions-4          1000000              1084 ns/op
-PASS
-ok      github.com/irfansharif/qpool    1.224s
-
-~ go test -bench=. -tags ballot
+➜  qpool git:(master) go test -count 10 -tags ballot -bench .
+BenchmarkAcquisitions-4          1000000              1206 ns/op
+BenchmarkAcquisitions-4          1000000              1177 ns/op
+BenchmarkAcquisitions-4          1000000              1176 ns/op
+BenchmarkAcquisitions-4          1000000              1174 ns/op
+BenchmarkAcquisitions-4          1000000              1186 ns/op
+BenchmarkAcquisitions-4          1000000              1171 ns/op
+BenchmarkAcquisitions-4          1000000              1175 ns/op
+BenchmarkAcquisitions-4          1000000              1175 ns/op
+BenchmarkAcquisitions-4          1000000              1172 ns/op
 BenchmarkAcquisitions-4          1000000              1174 ns/op
 PASS
-ok      github.com/irfansharif/qpool    1.309s
+ok      github.com/irfansharif/qpool    13.026s
+
+➜  qpool git:(master) go test -count 10 -tags cond -bench .
+BenchmarkAcquisitions-4          2000000               607 ns/op
+BenchmarkAcquisitions-4          2000000               607 ns/op
+BenchmarkAcquisitions-4          2000000               621 ns/op
+BenchmarkAcquisitions-4          2000000               608 ns/op
+BenchmarkAcquisitions-4          2000000               609 ns/op
+BenchmarkAcquisitions-4          2000000               605 ns/op
+BenchmarkAcquisitions-4          2000000               607 ns/op
+BenchmarkAcquisitions-4          2000000               609 ns/op
+BenchmarkAcquisitions-4          2000000               610 ns/op
+BenchmarkAcquisitions-4          2000000               607 ns/op
+PASS
+ok      github.com/irfansharif/qpool    19.500s
 ```
 
 ## API
