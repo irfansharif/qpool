@@ -22,30 +22,24 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"golang.org/x/net/context"
 )
 
 type QPool struct {
-	syncutil.Mutex
+	sync.Mutex
 
-	q        int64
-	max      int64
-	cond     *sync.Cond
-	closed   bool
-	closedCh chan struct{}
+	q      int64
+	max    int64
+	closed bool
+	cond   *sync.Cond
 }
 
 // newQuotaPool returns a new instance of a quota pool initialized with the
 // specified quota. The quota pool is capped at this amount.
 func New(v int64) *QPool {
 	qp := &QPool{
-		q:        v,
-		max:      v,
-		closedCh: make(chan struct{}),
+		q:   v,
+		max: v,
 	}
 	qp.cond = sync.NewCond(qp)
 	return qp
@@ -56,10 +50,8 @@ func New(v int64) *QPool {
 // acquisitions will not succeed. Safe for concurrent use.
 func (qp *QPool) Release(q int64) {
 	qp.Lock()
-	q += qp.q
-	if q < qp.max {
-		qp.q = q
-	} else {
+	qp.q += q
+	if qp.q > qp.max {
 		qp.q = qp.max
 	}
 	qp.cond.Broadcast()
@@ -73,26 +65,18 @@ func (qp *QPool) Release(q int64) {
 // acquisition, the caller is responsible for returning the quota back to the
 // pool eventually (see QPool.add). Safe for concurrent use.
 func (qp *QPool) Acquire(ctx context.Context, v int64) error {
-	res := make(chan error, 1)
-	done := new(bool)
+	res := make(chan error)
 	go func() {
-		qp.acquireInternal(v, done, res)
+		qp.acquireInternal(v, ctx.Done(), res)
 	}()
-	slowTimer := timeutil.NewTimer()
-	defer slowTimer.Stop()
-	slowTimer.Reset(base.SlowRequestThreshold)
 
 	for {
 		select {
-		case <-slowTimer.C:
-			log.Warningf(ctx, "have been waiting %s attempting to acquire quota",
-				base.SlowRequestThreshold)
 		case <-ctx.Done():
 			// Given we've seen a context cancellation here, we ensure the quota
 			// acquisition goroutine runs to completion. We do so by waiting for a
 			// result on the 'res' channel. If we end up acquiring quota, we're
 			// sure to return it.
-			*done = true
 
 			// Wake up the acquisition goroutine to signal it to stop working.
 			qp.cond.Broadcast()
@@ -104,32 +88,13 @@ func (qp *QPool) Acquire(ctx context.Context, v int64) error {
 			}
 
 			return ctx.Err()
-		case <-qp.closedCh:
-			// Given the quota pool was just closed, we ensure the quota
-			// acquisition goroutine runs to completion. We do so by waiting for a
-			// result on the 'res' channel. If we end up acquiring quota, we're
-			// sure to return it.
-			*done = true
-
-			// Wake up the acquisition goroutine to signal it to stop working.
-			qp.cond.Broadcast()
-
-			// We acquired quota, we release it back because the quota pool was
-			// closed.
-			// NB: Strictly speaking this is not necessary given future allocations
-			// will fail anyway.
-			if err := <-res; err == nil {
-				qp.Release(v)
-			}
-
-			return errors.New("quota pool closed")
 		case err := <-res:
 			return err
 		}
 	}
 }
 
-func (qp *QPool) acquireInternal(v int64, done *bool, res chan<- error) {
+func (qp *QPool) acquireInternal(v int64, done <-chan struct{}, res chan<- error) {
 	qp.Lock()
 
 	for !(v <= qp.q) {
@@ -137,17 +102,31 @@ func (qp *QPool) acquireInternal(v int64, done *bool, res chan<- error) {
 		// If we were signalled it could possibly be because quota was just
 		// added to the pool which we check in the next loop iteration.
 		// Alternatively we no longer need the result.
-		if *done {
+		select {
+		case <-done:
 			qp.Unlock()
 			res <- errors.New("acquisition cancelled")
+			return
+		default:
+		}
+
+		if qp.closed {
+			qp.Unlock()
+			res <- errors.New("quota pool closed")
 			return
 		}
 	}
 
-	// Critical section, we have the lock.
+	// Critical section, we have the lock. If the pool was closed, we fail with
+	// an error indicating so.
+	if qp.closed {
+		qp.Unlock()
+		res <- errors.New("quota pool closed")
+		return
+	}
+
 	// While the lock is held, no other go routine is acquiring/decrementing quota.
 	qp.q -= v
-
 	qp.Unlock()
 	res <- nil
 }
@@ -163,8 +142,8 @@ func (qp *QPool) Quota() int64 {
 func (qp *QPool) Close() {
 	qp.Lock()
 	if !qp.closed {
-		close(qp.closedCh)
 		qp.closed = true
+		qp.cond.Broadcast()
 	}
 	qp.Unlock()
 }

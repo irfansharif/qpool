@@ -38,16 +38,14 @@ type QPool struct {
 	quota  int64
 	closed bool
 
-	cond     *sync.Cond
-	closedCh chan struct{}
+	cond *sync.Cond
 }
 
 // qpool.New returns a new instance of a quota pool initialized with the
 // specified quota.
 func New(v int64) *QPool {
 	qp := &QPool{
-		quota:    v,
-		closedCh: make(chan struct{}),
+		quota: v,
 	}
 	qp.cond = sync.NewCond(qp)
 	return qp
@@ -88,15 +86,13 @@ func (qp *QPool) Release(v int64) {
 func (qp *QPool) Acquire(ctx context.Context, v int64) error {
 	// TODO(irfansharif): We may want to minimize allocations here across
 	// multiple calls to Acquire, we can do this by using sync.Pool for
-	// 'res' channels below and the allocated 'done' flag. Alternatively
-	// maintaining a freelist will enable us to do the same preserving
-	// allocations across GC runs. This approach would necessitate releasing
-	// 'res' and 'done' when returning from Acquire.
+	// 'res' channels below. Alternatively maintaining a freelist will enable
+	// us to do the same preserving allocations across GC runs. This approach
+	// would necessitate releasing 'res' when returning from Acquire.
 
-	res := make(chan error, 1)
-	done := new(bool)
+	res := make(chan error)
 	go func() {
-		qp.acquire(v, done, res)
+		qp.acquire(v, ctx.Done(), res)
 	}()
 
 	select {
@@ -105,7 +101,6 @@ func (qp *QPool) Acquire(ctx context.Context, v int64) error {
 		// acquisition goroutine runs to completion. We do so by waiting for a
 		// result on the 'res' channel. If we end up acquiring quota, we're
 		// sure to return it.
-		*done = true
 
 		// Wake up the acquisition goroutine to signal it to stop working.
 		qp.cond.Broadcast()
@@ -117,27 +112,12 @@ func (qp *QPool) Acquire(ctx context.Context, v int64) error {
 		}
 
 		return ctx.Err()
-	case <-qp.closedCh:
-		// Given the quota pool was just closed, we ensure the quota
-		// acquisition goroutine runs to completion. We do so by waiting for a
-		// result on the 'res' channel. If we end up acquiring quota, we're
-		// sure to return it.
-		*done = true
-
-		// Wake up the acquisition goroutine to signal it to stop working.
-		qp.cond.Broadcast()
-
-		// We acquired quota, we need not release it back to the pool given
-		// future allocations will fail anyway.
-		<-res
-
-		return errors.New("quota pool closed")
 	case err := <-res:
 		return err
 	}
 }
 
-func (qp *QPool) acquire(v int64, done *bool, res chan<- error) {
+func (qp *QPool) acquire(v int64, done <-chan struct{}, res chan<- error) {
 	// sync.Cond has the following usage pattern:
 	//
 	// // Acquire this monitor's lock.
@@ -161,37 +141,40 @@ func (qp *QPool) acquire(v int64, done *bool, res chan<- error) {
 
 	// While the is held, no other go routine is acquiring quota.
 	// Acquire this monitor's lock.
-	qp.cond.L.Lock()
+	qp.Lock()
 	// While the condition/predicate/assertion that we are waiting for is not true...
 	for !(v <= atomic.LoadInt64(&qp.quota)) {
 		// Wait on this monitor's lock and condition variable. If we were
 		// signalled it could possibly be because we were closed or the we no
 		// longer need the result.
 		qp.cond.Wait()
-		if *done {
-			qp.cond.L.Unlock()
+		select {
+		case <-done:
+			qp.Unlock()
 			res <- errors.New("acquisition cancelled")
+			return
+		default:
+		}
+
+		if qp.closed {
+			qp.Unlock()
+			res <- errors.New("quota pool closed")
 			return
 		}
 	}
 
-	// TODO(irfansharif): Shouldn't the following be here? Where are the worst
-	// places such that context cancellation/quota pool closing happens but we return quota anyway.
-	// NOTE: Context cancellation is NOT serialized through a mutex, are select
-	// cases arbitrary if more than one or is there precedence?
-	//
-	// if *done {
-	// 	qp.cond.L.Unlock()
-	// 	res <- errors.New("acquisition cancelled")
-	// 	return
-	// }
-
 	// Critical section, we have the lock.
+	if qp.closed {
+		qp.Unlock()
+		res <- errors.New("quota pool closed")
+		return
+	}
+
 	// Lock held for decrementing.
 	atomic.AddInt64(&qp.quota, -v)
 
 	// Release this monitor's lock.
-	qp.cond.L.Unlock()
+	qp.Unlock()
 	res <- nil
 	return
 }
@@ -205,12 +188,8 @@ func (qp *QPool) Quota() int64 {
 // QPool.Close closes the quota pool and is safe for concurrent use. Any
 // ongoing and subsequent acquisitions fail with an error indicating so.
 func (qp *QPool) Close() {
-	// TODO(irfansharif): Not reusing the same lock as Acquire would reduce
-	// lock contention at the cost of increasing the overall size of the quota
-	// pool.
 	qp.Lock()
 	if !qp.closed {
-		close(qp.closedCh)
 		qp.closed = true
 		qp.cond.Broadcast()
 	}
