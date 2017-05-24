@@ -14,7 +14,7 @@
 //
 // Author: Irfan Sharif (irfanmahmoudsharif@gmail.com)
 //
-// +build !grpc,!fair
+// +build !grpc,!fair,!fifo
 
 package qpool_test
 

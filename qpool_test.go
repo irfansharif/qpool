@@ -18,6 +18,7 @@ package qpool_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -180,14 +181,26 @@ func TestCancelledAcquisitions(t *testing.T) {
 	}
 	// qp.Release(5)
 
+	var wg sync.WaitGroup
+	wg.Add(5)
+	ch := make(chan error, 5)
 	for i := 0; i < 5; i++ {
-		if err := qp.Acquire(ctx, 5); err == nil {
-			t.Fatal("expected context canceled error")
-		}
+		go func() {
+			defer wg.Done()
+			if err := qp.Acquire(ctx, 5); err == nil {
+				ch <- errors.New("expected context canceled error")
+			}
+		}()
+	}
+
+	wg.Wait()
+	select {
+	case err := <-ch:
+		t.Fatal(err)
+	default:
 	}
 
 	qp.Release(5)
-	ch := make(chan error)
 	go func() {
 		if err := qp.Acquire(context.Background(), 5); err != nil {
 			ch <- err
@@ -197,8 +210,11 @@ func TestCancelledAcquisitions(t *testing.T) {
 	}()
 
 	select {
-	case <-ch:
-	case <-time.After(time.Second):
+	case err := <-ch:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
 		t.Fatal("acquisition didn't go through")
 	}
 }
