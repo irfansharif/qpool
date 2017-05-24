@@ -1,4 +1,4 @@
-// Copyright 2017, Irfan Sharif
+// Copyright 2017, Irfan Sharif.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -147,7 +147,6 @@ func (qp *QPool) acquire(v int64, done <-chan struct{}, res chan<- error) {
 		// Wait on this monitor's lock and condition variable. If we were
 		// signalled it could possibly be because we were closed or the we no
 		// longer need the result.
-		qp.cond.Wait()
 		select {
 		case <-done:
 			qp.Unlock()
@@ -161,6 +160,16 @@ func (qp *QPool) acquire(v int64, done <-chan struct{}, res chan<- error) {
 			res <- errors.New("quota pool closed")
 			return
 		}
+
+		qp.cond.Wait()
+	}
+
+	select {
+	case <-done:
+		qp.Unlock()
+		res <- errors.New("acquisition cancelled")
+		return
+	default:
 	}
 
 	// Critical section, we have the lock.
